@@ -1,18 +1,11 @@
-Topic:IBM HR Analytics Employee Attrition & Performance
-Structure of the Project:
-1. Data cleaning and exploration
-2. logistic regression model
-3. classification model
-4. business conclusion
-There are 35 variables in the raw datas and 1500 observations.
-Based on the IBM Employee information records, analyze the factors most affect the employee attrition.
-At the end, finding 13 independents variables
+Topic: Bank Telemarketing data analysis
+Analyzing the records of this telemarketing campaign, we would like to know whether Telephonic marketing campaign is effective in customer acquisition.
 
-Business actionable insight based on the HR data analysis
-Decrease work overtime
-Improve employee  Job satisfaction
-Improve employee Job Involvement 
-Decrease business travel times 
-Appropriately arrange work address 
+Objective of the Project:
+1: Customer Segmentation (Identify customer groups most receptive to term deposit offers)
+2: Campaign Optimization (Determine the most effective communication channels and contact frequency)
+3: Predictive Modeling
 
+Data source: https://www.kaggle.com/datasets/prakharrathi25/banking-dataset-marketing-targets
 
+The dataset contains 45,211 rows and 17 columns. The target variable in this dataset is y, which is a categorical variable that takes on the value of either “yes” or “no” for whether the customer has subscribed to a term deposit as a result of the current marketing. And there are 16 predictor variables related to the customer’s demographic information and financial status, and the previous and current marketing campaign results for customers. In terms of data type, there are 7 numerical variables and 9 categorical variables.
