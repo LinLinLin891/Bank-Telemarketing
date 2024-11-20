@@ -1,0 +1,924 @@
+---
+title: "pjt_bank_marketing"
+author: "Eunyoung Kwak, Cindy Miao, Haiying Lin, Susie Liang"
+date: "2024-05-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, label='Libraries', setup, include=FALSE}
+library(readxl)
+library(data.table)
+library(tidyverse)
+library(randomForest) # Random Forests
+library(e1071) # SVM
+library(gridExtra)
+library(cluster) # cluster
+library(doParallel)
+library(factoextra)
+library(rpart)
+library(rpart.plot)
+library(ggplot2)
+library(caret) #lasso split data
+library(glmnet) # lasso model
+```
+
+
+# 1. Data Preparation
+
+* Banking Dataset - Marketing Targets
+  + https://www.kaggle.com/datasets/prakharrathi25/banking-dataset-marketing-targets
+
+```{r Data Structure}
+bank <- read_excel("bank.xlsx") # input data
+str(bank)
+```
+
+## 7 Numarical Variables
+
+```{r Numerical Summaries}
+summary(bank[sapply(bank, is.numeric)])
+```
+
+## 10 Categorical Variables (including the target variable y)
+
+```{r Categorical Variables}
+sapply(bank[sapply(bank, is.character)], unique)
+```
+
+```{r Factors}
+bank[sapply(bank, is.character)] <- lapply(bank[sapply(bank, is.character)], as.factor)
+bank$month <- factor(bank$month, levels = c("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")) 
+bank$poutcome <- factor(bank$poutcome, levels = c("success", "failure", "unknown", "other"))
+# str(bank)
+summary(bank[sapply(bank, is.factor)])
+```
+
+# 2. Exploratory Data Analysis
+
+## Target Variable y Term deposit subscribed?
+
+```{r Y Variable}
+
+# y_count <- table(bank$y)
+# y_label <- paste0(toupper(names(y_count))," - ",y_count," (",round(y_count/sum(y_count)*100,1),"%)")
+# 
+# pie(y_count, labels=y_label, col=c("#EE4E4E","#97BE5A"), main="Term deposit subscribed")
+
+tibble(count = as.integer(table(bank$y)),
+       label = paste0(toupper(names(table(bank$y)))," - ",table(bank$y)," (",round(table(bank$y)/sum(table(bank$y))*100,1),"%)")) %>%
+  ggplot(aes(x = "", y = count, fill = label)) +
+  geom_bar(stat = "identity", width = 1, show.legend = FALSE) +
+  coord_polar(theta = "y") +
+  theme_void() +
+  labs(title = "Term Deposit Subscription") +
+  geom_text(aes(label = label), position = position_stack(vjust = 0.5))
+
+```
+
+## Predictor variables: Numerical
+
+* Most of them are right-skewed and have a lot of outliers.
+
+```{r Numerical-Hist}
+colnm1 <- colnames(bank[sapply(bank, is.numeric)])
+
+plot_list <- list()
+
+for (i in  1:length(colnm1)) {
+  plot_list[[i]] <- ggplot(bank) +
+    geom_histogram(aes(x=!!sym(colnm1[i])), fill="orange", show.legend = FALSE, bins=30) +
+    ggtitle(colnm1[i]) + 
+    theme_bw()
+}
+
+grid.arrange(plot_list[[1]], plot_list[[2]], plot_list[[3]], plot_list[[4]], ncol=2)
+grid.arrange(plot_list[[5]], plot_list[[6]], plot_list[[7]], ncol=2)
+
+```
+
+```{r Numerical-Box}
+colnm1 <- colnames(bank[sapply(bank, is.numeric)])
+
+plot_list <- list()
+
+for (i in  1:length(colnm1)) {
+  plot_list[[i]] <- ggplot(bank) +
+    geom_boxplot(aes(x=!!sym(colnm1[i]))) +
+    ggtitle(colnm1[i]) + coord_flip() +
+    theme_bw()
+}
+
+grid.arrange(plot_list[[1]], plot_list[[2]], plot_list[[3]], plot_list[[4]], ncol=4)
+grid.arrange(plot_list[[5]], plot_list[[6]], plot_list[[7]], ncol=3)
+```
+
+## Predictor variables: Categorical
+
+* contact and poutcome columns have relatively large portion of "unknown" values.
+
+```{r Categorical - Bar}
+desc <- c("Type of Job", "Marital status", "Education level", "Has credit in default?",
+          "Has a housing loan?", "Has a personal loan?", "Contact communication type",
+          "Last contact month of year", "Previous campaign results", "Term deposit subscribed?")
+colnm2 <- colnames(bank[sapply(bank, is.factor)] %>% select(-y))
+
+plot_list <- list()
+
+for (i in 1:length(colnm2)) {
+  plot_list[[i]] <- ggplot(data = bank) + 
+          geom_bar(aes(x = !!sym(colnm2[i]), fill=!!sym(colnm2[i])), show.legend = FALSE) + 
+          coord_flip() +
+          ggtitle(paste0(colnm2[i],": ",desc[i])) + xlab("") + theme_bw()
+}
+
+plot_list[[1]]
+grid.arrange(plot_list[[2]], plot_list[[3]], ncol=1)
+grid.arrange(plot_list[[4]], plot_list[[5]], ncol=1)
+grid.arrange(plot_list[[6]], plot_list[[7]], ncol=1)
+grid.arrange(plot_list[[8]], plot_list[[9]], ncol=1)
+
+```
+
+## Relatioships
+
+### Correlation
+
+* pdays - poutcome(unknown) : -0.87
+* pdays - poutcome(failure) :  0.70
+* education(tertiary) - job(management) : 0.60
+* poutcome(unknown) - previous : -0.53
+
+```{r Highest Cor}
+matrix.bank <- model.matrix(~., data=bank)
+matrix.bank <- matrix.bank[,-1] ## remove intercept
+
+data.frame(which(abs(cor(matrix.bank)) > 0.5 & cor(matrix.bank) != 1, arr.ind = TRUE)) %>%
+  mutate(rowname=rownames(cor(matrix.bank))[row],
+         colname=colnames(cor(matrix.bank))[col],
+         corr = round(cor(matrix.bank)[cbind(row, col)],2)) %>%
+  select(3:5) %>%
+  arrange(desc(abs(corr)))
+```
+
+*pdays - poutcome* 
+  + If the outcome of the last campaign was unknown, the bank re-contacts the customer as soon as possible. (correlation: -0.87)
+  + If successful, the bank re-contacts the customer relatively quickly because this campaign is likely to be successful as well.
+  + If the campaign was unsuccessful (failure or other), the bank reaches out to the customer at a longer interval because this campaign is likely to be unsuccessful as well. (correlation: 0.70)
+
+```{r pdays - poutcome}
+
+ggplot(bank, aes(x=reorder(poutcome, pdays, FUN=median), y=pdays)) +
+  geom_boxplot() +
+  labs(title="Days since last contact in previous campaign vs. previous campaign outcome", x="previous campaign outcome") +
+  theme_bw()
+
+```
+
+*education(tertiary) - job(management): 0.60*
+
+```{r education(tertiary) - job(management)}
+
+bank %>% select(job, education) %>%
+  group_by(job, education) %>% summarise(cnt=n(), .groups="drop") %>%
+  group_by(job) %>% mutate(Percent = round(cnt/sum(cnt)*100,1)) %>%
+
+  ggplot(aes(x=job, y=Percent, fill=education)) +
+  geom_bar(stat="identity") +
+  geom_text(aes(label=paste0(Percent,"%")), position = position_stack(vjust = 0.5)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+*poutcome(unknown) - previous: -0.53*
+Previous contacts for this client before this campaign vs. previous campaign outcome
+
+```{r poutcome(unknown) - previous}
+
+gg1 <- ggplot(bank, aes(x=reorder(poutcome, previous, FUN=median), y=previous)) +
+  geom_boxplot() +
+  labs(title="Previous vs. previous outcome", x="previous campaign outcome") +
+  theme_bw()
+
+gg2 <- gg1 + coord_cartesian(ylim=c(0,10))
+
+grid.arrange(gg1, gg2, ncol=2)
+
+```
+
+
+### Relationships between Target Variable(y) and Predictor Variables
+
+```{r Predictor with y Percent}
+
+# Early Adult: 18-29 years old
+# Young Adult: 30-44 years old
+# Middle-Aged Adult: 45-64 years old
+# Elderly/Senior: 65 years old and older
+
+desc <- c("Type of Job", "Marital status", "Education level", "Has credit in default?",
+          "Has a housing loan?", "Has a personal loan?", "Contact communication type",
+          "Last contact month of year", "Previous campaign results", "Term deposit subscribed?")
+
+colnm <- colnames(bank[sapply(bank, is.factor)] %>% select(-y))
+
+for (i in  1:length(colnm)) {
+  print(bank %>%
+      select(y,age,!!sym(colnm[i])) %>% 
+      mutate(AgeGroup=cut(bank$age, breaks = c(18, 30, 45, 64, 96),
+                          labels = c("18-29", "30-44", "45-64", "65-95"),
+                          right = FALSE)) %>%
+      group_by(!!sym(colnm[i]), AgeGroup) %>%
+      summarize(cnt=n(), .groups = "drop") %>%
+      group_by(!!sym(colnm[i])) %>%
+      mutate(Percent=round(cnt/sum(cnt)*100,1)) %>%
+      ggplot(aes(x=!!sym(colnm[i]), y=Percent, fill=AgeGroup)) + 
+      geom_bar(stat="identity") +
+      geom_text(aes(label=paste0(Percent,"%")), position = position_stack(vjust = 0.5)) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+      labs(title=desc[i], x="", y=""))
+}
+
+```
+
+#### Numerical variables vs. y
+
+```{r Numerical vs. y - Density}
+
+gg1 <- ggplot(bank, aes(x=age, fill=y)) + geom_density(alpha=0.3) + labs(fill="subscribed") + theme_bw()
+gg2 <- ggplot(bank, aes(x=balance, fill=y)) + geom_density(alpha=0.3) + labs(fill="subscribed") + theme_bw()
+gg3 <- ggplot(bank, aes(x=day, fill=y)) + geom_density(alpha=0.3) + labs(fill="subscribed") + theme_bw()
+gg4 <- ggplot(bank, aes(x=duration, fill=y)) + geom_density(alpha=0.3) + labs(fill="subscribed") + theme_bw()
+gg5 <- ggplot(bank, aes(x=campaign, fill=y)) + geom_density(alpha=0.3) + labs(fill="subscribed") + theme_bw()
+gg6 <- ggplot(bank, aes(x=pdays, fill=y)) + geom_density(alpha=0.3) + labs(fill="subscribed") + theme_bw()
+gg7 <- ggplot(bank, aes(x=previous, fill=y)) + geom_density(alpha=0.3) + labs(fill="subscribed") + theme_bw()
+
+grid.arrange(gg1, gg2, gg3, gg4, ncol=2)
+grid.arrange(gg5, gg6, gg7, ncol=2)
+
+```
+
+```{r Numerical vs. y (Density scaled)}
+ggplot(bank, aes(x=balance, fill=y)) + geom_density(alpha=0.3) + labs(fill="Subscribed") + 
+  coord_cartesian(xlim=c(-2000, 10000)) + theme_bw()
+ggplot(bank, aes(x=duration, fill=y)) + geom_density(alpha=0.3) + labs(fill="Subscribed") + 
+  coord_cartesian(xlim=c(0,2000)) + theme_bw()
+ggplot(bank, aes(x=campaign, fill=y)) + geom_density(alpha=0.3) + labs(fill="Subscribed") + 
+  coord_cartesian(xlim=c(0,20)) + theme_bw()
+ggplot(bank, aes(x=pdays, fill=y)) + geom_density(alpha=0.3) + labs(fill="Subscribed") + 
+  coord_cartesian(xlim=c(0,250)) + theme_bw()
+ggplot(bank, aes(x=previous, fill=y)) + geom_density(alpha=0.3) + labs(fill="Subscribed") + 
+  coord_cartesian(xlim=c(0,15)) + theme_bw()
+```
+
+*pdays: Number of days that passed by after the client was last contacted from a previous campaign (numeric, -1 means client was not previously contacted)*
+
+```{r pdays vs. y - Bar}
+bank %>%
+  select(y,pdays) %>% 
+  mutate(pday=cut(bank$pdays, breaks = c(-1, 0, 50, 100, 150, 200, 250, 300, Inf),
+                      labels = c("No Contact", "0-50", "50-100", "100-150", "150-200", "200-250", "250-300", "300+"),
+                      right = FALSE)) %>%
+  group_by(y, pday) %>%
+  summarise(cnt=n(), .groups = "drop") %>%
+  group_by(y) %>%
+  mutate(Percent=round(cnt/sum(cnt)*100,1)) %>%
+  ggplot(aes(x=pday, y=Percent, fill=y)) +
+  geom_bar(stat="identity", position="dodge") +
+  labs(title="Days since last contact in previous campaign", x="", y="% Subscribed", fill="Subscribed") +
+  
+  theme_bw()
+```
+
+```{r Numerical vs. y - Box}
+
+gg1 <- bank %>% ggplot(aes(x=y, y=age)) + geom_boxplot() + theme_bw()
+gg2 <- bank %>% ggplot(aes(x=y, y=balance)) + geom_boxplot() + theme_bw()
+gg3 <- bank %>% ggplot(aes(x=y, y=day)) + geom_boxplot() + theme_bw()
+gg4 <- bank %>% ggplot(aes(x=y, y=duration)) + geom_boxplot() + theme_bw()
+gg5 <- bank %>% ggplot(aes(x=y, y=campaign)) + geom_boxplot() + theme_bw()
+gg6 <- bank %>% ggplot(aes(x=y, y=pdays)) + geom_boxplot() + theme_bw()
+gg7 <- bank %>% ggplot(aes(x=y, y=previous)) + geom_boxplot() + theme_bw()
+
+grid.arrange(gg1, gg2, gg3, gg4, gg5, gg6, gg7, ncol=4)
+
+```
+
+```{r Categorical vs. y Percent - Bar}
+
+desc <- c("Type of Job", "Marital status", "Education level", "Has credit in default?", "Has a housing loan?",
+          "Has a personal loan?", "Contact communication type", "Last contact month of year", "Previous campaign results")
+colnm2 <- colnames(bank[sapply(bank, is.factor)] %>% select(-y))
+
+for (i in 1:length(colnm2)) {
+  print(bank %>% 
+    group_by(y,!!sym(colnm2[i])) %>% summarize(cnt=n(), .groups="drop") %>% 
+    group_by(y) %>% mutate(Percent = cnt/sum(cnt)*100) %>%
+    ggplot(aes(x = reorder(!!sym(colnm2[i]), Percent, FUN=max), y = Percent, fill = y)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_text(aes(label=paste(round(Percent,2),"%")), position = position_dodge(width = 0.9), hjust = -0.1, size=3.5) +
+    labs(title = desc[i],
+         x = "",
+         y = "% Subscription",
+         fill = "Subscribed") +
+    coord_flip() +
+    theme_bw())
+}
+
+```
+
+# 3. Customer Segmentation --- K means
+
+```{r Data Preparation}
+# Scale only numeric variables
+numeric_vars <- bank %>% select(where(is.numeric))
+scaled_numeric_vars <- as.data.frame(scale(numeric_vars))
+
+# Combine the scaled numeric variables with the categorical variables
+categorical_vars <- bank %>% select(where(is.factor))
+scaled_bank <- cbind(scaled_numeric_vars, categorical_vars)
+
+# Convert only categorical variables to dummy variables
+scaled_bank_dummies <- scaled_bank %>%
+  mutate_if(is.factor, as.character) %>%
+  mutate_if(is.character, as.factor) %>%
+  model.matrix(~ . -1, data = .) %>%
+  as.data.table()
+```
+
+
+## Elbow Test
+```{r Elbow Test, warning=FALSE}
+# # Elbow Test
+# set.seed(208) # For reproducibility
+# 
+# # Register parallel backend
+# cl <- makeCluster(detectCores() - 1) # Use one less core than available
+# registerDoParallel(cl)
+# 
+# # Sample a subset of the data
+# sampled_data <- scaled_bank_dummies[sample(1:nrow(scaled_bank_dummies), size = 1000), ]
+# 
+# # Run fviz_nbclust with parallel processing 
+# fviz_nbclust(sampled_data, kmeans, method = "wss", k.max = 10)
+# 
+# # Stop the parallel backend
+# stopCluster(cl)
+# registerDoSEQ()
+
+set.seed(208)
+
+wss <- function(k) {
+  kmeans(scaled_bank_dummies, k)$tot.withinss
+}
+k.values <- 1:15
+wss.values <- sapply(k.values, wss)
+
+plot(k.values, wss.values, type="b", pch = 19, frame = FALSE,
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+
+
+```
+
+**Based on the elbow plot shown, the optimal number of clusters to be 3.**
+
+
+## K-Means Cluster Plot
+```{r K-Means Clusting}
+# Apply k-means clustering
+
+# optimal 
+set.seed(208)
+StrattonCluster_3k <- kmeans(scaled_bank_dummies, 3)
+set.seed(208)
+StrattonCluster_4k <- kmeans(scaled_bank_dummies, 4)
+set.seed(208)
+StrattonCluster_5k <- kmeans(scaled_bank_dummies, 5)
+set.seed(208)
+StrattonCluster_6k <- kmeans(scaled_bank_dummies, 6)
+```
+
+*I changed the x, y scaling to exclude the most skewed outliers.*
+```{r 3 Cluster Plot}
+set.seed(208)
+# # Visualize the clusters k = 3
+fviz_cluster(StrattonCluster_3k, data = scaled_bank_dummies, 
+              ellipse.type = "norm", geom = "point", pointsize = 1) +
+   ggtitle("Cluster Visualization with Custom Scales") +
+   theme_minimal()
+ 
+# # Visualize the clusters k = 3 without outlier
+ fviz_cluster(StrattonCluster_3k, data = scaled_bank_dummies, 
+              ellipse.type = "norm", geom = "point", pointsize = 1) +
+   xlim(-5, 15) + # Adjust x-axis limits
+   ylim(-10, 10) + # Adjust y-axis limits
+   ggtitle("Cluster Visualization with Custom Scales") +
+   theme_minimal()
+```
+
+```{r 456 Cluster K-Means}
+set.seed(208)
+# Visualize the clusters k = 4
+Cluster4 <- fviz_cluster(StrattonCluster_4k, data = scaled_bank_dummies, 
+             ellipse.type = "norm", geom = "point", pointsize = 1) +
+  xlim(-5, 15) + # Adjust x-axis limits
+  ylim(-10, 10) + # Adjust y-axis limits
+  ggtitle("4 Clusters") +
+  theme_minimal()
+
+set.seed(208)
+# Visualize the clusters k = 5
+Cluster5 <- fviz_cluster(StrattonCluster_5k, data = scaled_bank_dummies, 
+             ellipse.type = "norm", geom = "point", pointsize = 1) +
+  xlim(-5, 15) + # Adjust x-axis limits
+  ylim(-10, 10) + # Adjust y-axis limits
+  ggtitle("5 Clusters") +
+  theme_minimal()
+
+set.seed(208)
+# Visualize the clusters k = 6
+Cluster6 <- fviz_cluster(StrattonCluster_6k, data = scaled_bank_dummies, 
+             ellipse.type = "norm", geom = "point", pointsize = 1) +
+  xlim(-5, 15) + # Adjust x-axis limits
+  ylim(-10, 10) + # Adjust y-axis limits
+  ggtitle("6 Clusters") +
+  theme_minimal()
+
+#grid.arrange(Cluster4, Cluster5, Cluster6, ncol=3, nrow = 1)
+Cluster4
+Cluster5
+Cluster6
+```
+**Based on the cluster plot, it seems that customers should be divided into 3 clusters.**
+
+##  Cluster Size Plots
+```{r 4 Cluster Size Plot}
+# Cluster size of each cluster
+sizes4k <- data.frame(Size = StrattonCluster_4k[["size"]], 
+                      Cluster = c("Cluster1", "Cluster2", "Cluster3", "Cluster4"))
+
+size4 <- ggplot(sizes4k, aes(factor(Cluster), Size)) + 
+  geom_col(aes(fill = Cluster)) + 
+  xlab("Cluster") + 
+  ylab("Size") + 
+  geom_text(aes(label=Size), vjust = -0.2) + 
+  ggtitle("Cluster Size 4-Clusters") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_brewer(palette = "Paired")
+```
+
+```{r 5 Cluster Size Plot}
+sizes5k <- data.frame(Size = StrattonCluster_5k[["size"]], 
+                      Cluster = c("Cluster1", "Cluster2", "Cluster3", "Cluster4", "Cluster5"))
+
+size5 <- ggplot(sizes5k, aes(factor(Cluster), Size)) + 
+  geom_col(aes(fill = Cluster)) + 
+  xlab("Cluster") + 
+  ylab("Size") + 
+  geom_text(aes(label=Size), vjust = -0.2) + 
+  ggtitle("Cluster Size 5-Clusters") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_brewer(palette = "Paired")
+```
+
+```{r 6 Cluster Size Plot, echo=FALSE, fig.height=8, fig.width=11}
+sizes6k <- data.frame(Size = StrattonCluster_6k[["size"]], 
+                      Cluster = c("Cluster1", "Cluster2", "Cluster3", "Cluster4", "Cluster5", "Cluster6"))
+
+size6 <- ggplot(sizes6k, aes(factor(Cluster), Size)) + 
+  geom_col(aes(fill = Cluster)) + 
+  xlab("Cluster") + 
+  ylab("Size") + 
+  geom_text(aes(label=Size), vjust = -0.2) + 
+  ggtitle("Cluster Size 6-Clusters") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_brewer(palette = "Paired")
+
+grid.arrange(size4, size5, size6, ncol=3, nrow = 1)
+```
+
+```{r Add Clusters into Original Data}
+# Include Clusters into original data
+bank <- bank %>% 
+  mutate(k3Cluster = as.factor(StrattonCluster_3k[["cluster"]]),
+         k4Cluster = as.factor(StrattonCluster_4k[["cluster"]]),
+         k5Cluster = as.factor(StrattonCluster_5k[["cluster"]]),
+         k6Cluster = as.factor(StrattonCluster_6k[["cluster"]]))
+```
+
+## Subscription Rate Per Cluster Plots
+```{r 3 Clusters}
+bank %>%
+  group_by(k3Cluster, y) %>%
+  summarise(cnt = n()) %>%
+  ggplot(aes(x=k3Cluster, y=cnt, fill=y)) +
+  geom_bar(stat="identity", position="dodge") +
+  geom_text(aes(label=cnt), position = position_dodge(width = 0.9), vjust=-0.2)
+
+bank %>%
+  group_by(k3Cluster, y) %>%
+  summarise(cnt = n()) %>%
+  ungroup() %>%
+  group_by(k3Cluster) %>%
+  mutate(total = sum(cnt),
+         percentage = cnt / total * 100) %>%
+  ggplot(aes(x=k3Cluster, y=percentage, fill=y)) +
+  geom_bar(stat="identity", position="dodge") +
+  geom_text(aes(label=paste0(round(percentage,1), "%")), position = position_dodge(width = 0.9), vjust=-0.2)
+```
+
+```{r 456 Clusters Subscription Rate, fig.height=8, fig.width=11}
+# 4 Clusters
+ycount4 <- bank %>%
+  group_by(k4Cluster, y) %>%
+  summarise(cnt = n()) %>%
+  ggplot(aes(x=k4Cluster, y=cnt, fill=y)) +
+  geom_bar(stat="identity", position="dodge") +
+  geom_text(aes(label=cnt), position = position_dodge(width = 0.9), vjust=-0.2)
+
+y4 <- bank %>%
+  group_by(k4Cluster, y) %>%
+  summarise(cnt = n()) %>%
+  ungroup() %>%
+  group_by(k4Cluster) %>%
+  mutate(total = sum(cnt),
+         percentage = cnt / total * 100) %>%
+  ggplot(aes(x=k4Cluster, y=percentage, fill=y)) +
+  geom_bar(stat="identity", position="dodge") +
+  ggtitle("Subsciption Rate 4 Clusters") +
+  geom_text(aes(label=paste0(round(percentage,1), "%")), position = position_dodge(width = 0.9), vjust=-0.2)
+
+# 5 Clusters
+ycount5 <- bank %>%
+  group_by(k5Cluster, y) %>%
+  summarise(cnt = n()) %>%
+  ggplot(aes(x=k5Cluster, y=cnt, fill=y)) +
+  geom_bar(stat="identity", position="dodge") +
+  geom_text(aes(label=cnt), position = position_dodge(width = 0.9), vjust=-0.2)
+
+y5 <- bank %>%
+  group_by(k5Cluster, y) %>%
+  summarise(cnt = n()) %>%
+  ungroup() %>%
+  group_by(k5Cluster) %>%
+  mutate(total = sum(cnt),
+         percentage = cnt / total * 100) %>%
+  ggplot(aes(x=k5Cluster, y=percentage, fill=y)) +
+  geom_bar(stat="identity", position="dodge") + 
+  ggtitle("Subsciption Rate 5 Clusters") +
+  geom_text(aes(label=paste0(round(percentage,1), "%")), position = position_dodge(width = 0.9), vjust=-0.2)
+
+# 6 Clusters
+ycount6 <- bank %>%
+  group_by(k6Cluster, y) %>%
+  summarise(cnt = n()) %>%
+  ggplot(aes(x=k6Cluster, y=cnt, fill=y)) +
+  geom_bar(stat="identity", position="dodge") +
+  geom_text(aes(label=cnt), position = position_dodge(width = 0.9), vjust=-0.2)
+
+y6 <- bank %>%
+  group_by(k6Cluster, y) %>%
+  summarise(cnt = n()) %>%
+  ungroup() %>%
+  group_by(k6Cluster) %>%
+  mutate(total = sum(cnt),
+         percentage = cnt / total * 100) %>%
+  ggplot(aes(x=k6Cluster, y=percentage, fill=y)) +
+  geom_bar(stat="identity", position="dodge") +
+  ggtitle("Subsciption Rate 6 Clusters") +
+  geom_text(aes(label=paste0(round(percentage,1), "%")), position = position_dodge(width = 0.9), vjust=-0.2)
+
+grid.arrange(ycount4, ycount5, ycount6, ncol=3, nrow = 1)
+
+grid.arrange(y4, y5, y6, ncol=3, nrow = 1) 
+```
+
+## Cluster Mean Plots and Cluster Profile
+```{r 456 Cluster Means, fig.height=10, fig.width=13}
+# 4 Clusters
+# Build Mean per Cluster DataFrame
+scaled_bank_dummies$k4Cluster = StrattonCluster_4k[["cluster"]]
+
+summarystats.percluster_4k = scaled_bank_dummies %>% group_by(k4Cluster) %>% 
+  summarise_if(is.numeric, mean, na.rm = TRUE)
+
+var <- summarystats.percluster_4k %>% 
+  gather(key = "variable", value = "value", -k4Cluster)
+
+ggplot(var, aes(factor(k4Cluster), value)) +
+  geom_bar(stat = "identity", aes(fill = variable), show.legend = FALSE)  + 
+  xlab("Clusters") +
+  geom_text(aes(label = round(value, digits = 3)), size = 3.5, colour = "white", 
+            position = position_stack(vjust = 0.5)) +
+  ggtitle("Cluster Means of Each Variable 4 Clusters") +
+  facet_wrap(~variable, ncol=7, scales = "free_y") +
+  theme(strip.text = element_text(size = 10, face = "bold"),
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank())
+
+# 5 Clusters
+# Build Mean per Cluster DataFrame
+scaled_bank_dummies$k5Cluster = StrattonCluster_5k[["cluster"]]
+
+summarystats.percluster_5k = scaled_bank_dummies %>% group_by(k5Cluster) %>% 
+  summarise_if(is.numeric, mean, na.rm = TRUE)
+
+var <- summarystats.percluster_5k %>% 
+  gather(key = "variable", value = "value", -k4Cluster, -k5Cluster)
+
+ggplot(var, aes(factor(k5Cluster), value)) +
+  geom_bar(stat = "identity", aes(fill = variable), show.legend = FALSE)  + 
+  xlab("Clusters") +
+  geom_text(aes(label = round(value, digits = 3)), size = 3.5, colour = "white", 
+            position = position_stack(vjust = 0.5)) +
+  ggtitle("Cluster Means of Each Variable 5 Clusters") +
+  facet_wrap(~variable, ncol=7, scales = "free_y") +
+  theme(strip.text = element_text(size = 10, face = "bold"),
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank())
+
+# 6 Clusters
+# Build Mean per Cluster DataFrame
+scaled_bank_dummies$k6Cluster = StrattonCluster_6k[["cluster"]]
+
+summarystats.percluster_6k = scaled_bank_dummies %>% group_by(k6Cluster) %>% 
+  summarise_if(is.numeric, mean, na.rm = TRUE)
+
+var <- summarystats.percluster_6k %>% 
+  gather(key = "variable", value = "value", -k4Cluster, -k5Cluster, -k6Cluster)
+
+ggplot(var, aes(factor(k6Cluster), value)) +
+  geom_bar(stat = "identity", aes(fill = variable), show.legend = FALSE)  + 
+  xlab("Clusters") +
+  geom_text(aes(label = round(value, digits = 3)), size = 3.5, colour = "white", 
+            position = position_stack(vjust = 0.5)) +
+  ggtitle("Cluster Means of Each Variable 6 Clusters") +
+  facet_wrap(~variable, ncol=7, scales = "free_y") +
+  theme(strip.text = element_text(size = 10, face = "bold"),
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank())
+```
+
+## Cluster 2 Logistic
+```{r Full Model Logistic}
+bank$y <- ifelse(bank$y=="yes", 1, 0) %>% as.factor(.) # 1=yes,0=no 
+
+# full model
+bank1 <- bank %>% 
+  select(-k3Cluster, -k5Cluster, -k6Cluster) %>%
+  filter(k4Cluster == 2) %>%
+  select(-k4Cluster)
+
+logistic_cluster2 <- glm(y ~ ., data = bank1, family = "binomial")
+
+summary(logistic_cluster2)
+```
+
+```{r Check Collinearity}
+library(performance)
+check_collinearity(logistic_cluster2)
+```
+
+```{r Selected Model}
+# Remove month and poutcome
+cluster2 <- bank1 %>%
+  select(-month, -poutcome)
+
+# Train the logistic regression model using Cluster 2
+logistic_cluster2 <- glm(y ~ ., data = cluster2, family = "binomial")
+
+summary(logistic_cluster2)
+```
+
+```{r MultiCollinearity}
+library(performance)
+check_collinearity(logistic_cluster2)
+```
+
+```{r Odds}
+# Odds Ratio
+exp(cbind(OR=coef(logistic_cluster2), confint(logistic_cluster2)))
+```
+
+
+# 4. Lasso Variable Selection
+
+## Split data into training dataset and testing dataset
+```{r Data Partition, warning=FALSE}
+# remove clusters
+bank <- bank %>% select(-k3Cluster, -k4Cluster, -k5Cluster, -k6Cluster)
+
+# Split the data into two sets based on the value of y
+bank_y1 <- bank %>% filter(y == 1)
+bank_y0 <- bank %>% filter(y == 0)
+
+# Function to split data into train (80%) and test (20%) using caret
+split_data <- function(data, train_ratio = 0.8) {
+  set.seed(208) # For reproducibility
+  train_indices <- createDataPartition(data$y, p = train_ratio, list = FALSE)
+  
+  train_set <- data[train_indices, ]
+  test_set <- data[-train_indices, ]
+  
+  list(train = train_set, test = test_set)
+}
+
+# Split each dataset into train and test sets
+split_y1 <- split_data(bank_y1)
+split_y0 <- split_data(bank_y0)
+
+# Extract train and test sets
+train_y1 <- split_y1$train
+test_y1 <- split_y1$test
+train_y0 <- split_y0$train
+test_y0 <- split_y0$test
+
+# Combine the train and test sets
+train_data <- bind_rows(train_y1, train_y0)
+test_data <- bind_rows(test_y1, test_y0)
+```
+
+```{r Lambda vs. cv Error}
+x <- model.matrix(y ~ ., train_data)[, -17]
+y <- train_data$y
+
+cv.lasso <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+plot(cv.lasso)
+```
+
+```{r Lasso Final Model}
+# exact value of lambda
+cv.lasso$lambda.min
+
+# Final model with lambda.min
+lasso_model <- glmnet(x, y, alpha = 1, family = "binomial",
+                      lambda = cv.lasso$lambda.min)
+lasso_model
+```
+```{r}
+coef(lasso_model, lasso_model$lambda.min)
+```
+
+```{r Lasso Prediction}
+# Make prediction on test data
+x.test <- model.matrix(y ~ ., test_data)[, -17]
+y.test <- test_data$y
+
+pred_prob <- lasso_model %>% predict(newx = x.test)
+pred_class <- ifelse(pred_prob > 0.8, 1, 0)
+
+# Evaluate the model
+confusionMatrix(as.factor(pred_class), as.factor(y.test), mode = "everything", positive = "1")
+```
+
+
+# 5. Predictive Modeling
+
+## 5.1 Logistic Regression Analysis
+
+### One Time Logistic
+```{r Single Logistic}
+# Train the logistic regression model using Cluster 2
+logistic_model <- glm(y ~ ., data = bank, family = "binomial")
+
+summary(logistic_model)
+```
+
+```{r Check MultiCollinearity}
+# Check for Multicollinearity
+library(performance)
+check_collinearity(logistic_model)
+```
+
+```{r Odds Ratio}
+# Odds Ratio
+exp(cbind(OR=coef(logistic_model), confint(logistic_model)))
+```
+
+### 10-fold Cross Validation
+
+```{r 10-fold CV Logistic}
+# Set up 10-fold cross-validation
+train_control <- trainControl(method = "cv", number = 10)
+
+# Train the logistic regression model using 10-fold cross-validation
+logistic_model_cv <- train(y ~ ., data = train_data, method = "glm", family = "binomial", trControl = train_control)
+
+# Display the results
+summary(logistic_model_cv)
+```
+
+```{r 10-fold cv Log Prediction}
+# Make predictions on the test set
+predictions <- predict(logistic_model_cv, newdata = test_data)
+# Evaluate the model
+confusionMatrix(predictions, test_data$y, mode = "everything", positive = "1")
+```
+
+
+## 5.2 SVM
+
+```{r Tune SVM Polynomial}
+svm.polynomial <- tune(svm, y~., data=bank, tunecontrol=tune.control(sampling="fix"),
+                       kernel="polynomial", ranges=list(cost=2^seq(-3,5,1), degree=c(1,2,3)))
+ 
+svm.polynomial$performances %>% arrange(error) %>% head(1)
+ 
+svm.polynomial$performances %>%
+    ggplot(aes(x=cost, y=error, color=as.factor(degree))) +
+    geom_point() +
+    geom_smooth(se=F, span=0.8) +
+    labs(color="degree") +
+    theme_bw()
+```
+
+```{r SVM Best Model}
+# Extract the best model
+best_svm_model <- svm.polynomial$best.model
+```
+
+```{r SVM Prediction}
+# Make predictions on the test dataset
+test_predictions <- predict(best_svm_model, newdata = test_data)
+conf_matrix_test <- confusionMatrix(test_predictions, test_data$y,mode = "everything", positive="1")
+conf_matrix_test
+```
+
+## 5.3 Decision tree
+
+```{r Tree Model}
+set.seed(208)
+model.DT <- rpart(y~., data = bank, method = "class", cp = 0.001, minsplit = 400, maxdepth = 5)
+rpart.plot(model.DT)
+```
+
+```{r Tree Prediction}
+test_predictions <- predict(model.DT, newdata = test_data, type = "class")
+conf_matrix_test <- confusionMatrix(test_predictions, test_data$y,mode = "everything",positive="1")
+conf_matrix_test
+```
+
+## 5.4 Random Forests
+
+```{r Random Forest}
+set.seed(208)
+results <- double(16)
+
+for(m in 1:16) {
+  model.RF <- randomForest(y~., data=bank, mtry=m, ntree=100)
+  results[m] <- mean(model.RF$err.rate[,1])
+}
+
+tibble(m=1:16, error=results) %>%
+  ggplot(aes(x=m, y=error)) +
+  geom_point() +
+  geom_smooth(se=F,span=0.4) +
+  theme_bw()
+```
+
+```{r Random Forest Prediction}
+which(results == min(results)) #7
+
+model.RF <- randomForest(y~., data=train_data, mtry=10, ntree=100)
+
+test_predictions <- predict(model.RF, newdata = test_data, type = "class")
+conf_matrix_test <- confusionMatrix(test_predictions, test_data$y,mode = "everything",positive="1")
+
+conf_matrix_test
+```
+
+```{r Variable Importance Plot}
+varImpPlot(model.RF)
+```
+
+## 5.5 KNN
+```{r KNN 10-fold CV Model}
+set.seed(208)
+knn_model_cv <- train(y ~ ., data = train_data, method = "knn", trControl = train_control, tuneLength = 10)
+print(knn_model_cv)
+```
+
+```{r KNN Plot}
+plot(knn_model_cv)
+```
+
+**This chart shows the k = 15 with accuracy approximately 88.69% for training dataset.**
+
+```{r KNN Prediction}
+prediction <- predict(knn_model_cv, newdata = test_data, mode = "everything", positive = "1")
+cf <- confusionMatrix(prediction, test_data$y, mode = "everything", positive = "1")
+cf
+```
+
+**With inital k = 15, the model correctly predict 88.55% target variable in test data set.**
+
+
